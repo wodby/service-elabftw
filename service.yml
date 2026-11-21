@@ -1,0 +1,404 @@
+name: elabftw
+icon: elabftw
+type: service
+title: eLabFTW
+guidance: GUIDANCE.md
+# Uploaded files live on one ReadWriteOnce volume, sessions are kept in the
+# container and every eLabFTW container runs its own email scheduler, so the
+# service runs as a single replica.
+scalable: false
+
+labels:
+- elabftw
+- eln
+
+options:
+- version: '6.0'
+  tag: '6.0.11'
+  digest: sha256:cd27f9a0170bc7e8ed5eb86cb5b4801aafd5179c87451cafbf2106c268d6bca0
+  default: true
+
+deployment:
+  strategy: rolling
+  shutdownGracePeriod: 30s
+
+endpoints:
+- name: elabftw
+  ports:
+  - name: http
+    number: 8080
+    protocol: http
+    main: true
+    routeDefaults:
+      https_redirect: 'true'
+
+tokens:
+# The 32 key bytes of eLabFTW's secret key. It encrypts the SMTP and
+# timestamping passwords and webhook secrets stored in the database; changing
+# it makes them unreadable.
+- name: key_bytes
+  generate:
+    regex: '[0-9a-f]{64}'
+
+settings:
+# The sysadmin account the first deployment creates, so the public sign-up page
+# never makes a stranger the sysadmin.
+- name: admin-email
+  title: Admin email
+  description: Email address of the eLabFTW sysadmin, used to sign in. Used only when the first deployment creates the sysadmin.
+  required: true
+  var: ELABFTW_ADMIN_EMAIL
+- name: admin-password
+  title: Admin password
+  description: Password of the eLabFTW sysadmin, at least 24 characters with an uppercase letter, a lowercase letter, a digit and a special character. Used only when the first deployment creates the sysadmin; change it in eLabFTW afterwards.
+  required: true
+  secret: true
+  var: ELABFTW_ADMIN_PASSWORD
+- name: admin-firstname
+  title: Admin first name
+  description: First name of the eLabFTW sysadmin. Used only when the first deployment creates the sysadmin.
+  default: Admin
+  var: ELABFTW_ADMIN_FIRSTNAME
+- name: admin-lastname
+  title: Admin last name
+  description: Last name of the eLabFTW sysadmin. Used only when the first deployment creates the sysadmin.
+  default: Sysadmin
+  var: ELABFTW_ADMIN_LASTNAME
+
+links:
+# eLabFTW supports MySQL 8 or later only, not MariaDB. The options select the
+# MySQL service and managed MySQL without matching either MariaDB service, and
+# the start script refuses any other server.
+- name: mysql
+  title: MySQL
+  required: true
+  # A managed database server's CA certificate, mounted when the server has
+  # one, so eLabFTW connects over TLS.
+  database:
+    ca:
+      filepath: /etc/wodby/db/ca.pem
+  selectors:
+  - type: db
+    option: '8.4'
+    labels:
+    - mysql
+  - type: db
+    option: '8'
+    labels:
+    - mysql
+  env:
+  - name: DB_HOST
+    value: '{{link.database.host}}'
+  - name: DB_PORT
+    value: '{{link.database.port}}'
+  - name: DB_NAME
+    value: '{{link.database.db.name}}'
+  - name: DB_USER
+    value: '{{link.database.user.name}}'
+    secret: true
+  - name: DB_PASSWORD
+    value: '{{link.database.user.password}}'
+    secret: true
+  # The path of the server's CA certificate when it has one, otherwise empty.
+  - name: DB_CERT_PATH
+    value: '{{link.database.caFile}}'
+# eLabFTW keeps its email settings in the database. With this link, the start
+# script replaces the installer's placeholder SMTP server and sender with these
+# values; settings saved in the Sysadmin panel are kept.
+- name: sendmail
+  title: SMTP server
+  selectors:
+  - type: service
+    labels:
+    - smtpd
+  env:
+  - name: ELABFTW_SMTP_HOST
+    value: '{{link.host}}'
+  - name: ELABFTW_SMTP_PORT
+    value: '{{link.port}}'
+  - name: ELABFTW_MAIL_FROM
+    value: 'noreply@{{service.primaryHost}}'
+
+env:
+- name: ELABFTW_KEY_BYTES
+  value: '{{tokens.key_bytes}}'
+  secret: true
+# Links in emails and API responses use this address.
+- name: SITE_URL
+  value: '{{service.primaryURL}}'
+# TLS ends at the cluster gateway, which sets X-Forwarded-Proto.
+- name: DISABLE_HTTPS
+  value: 'true'
+- name: SET_REAL_IP
+  value: 'true'
+- name: SET_REAL_IP_FROM
+  value: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7
+# Schema updates of a new version run before eLabFTW starts serving.
+- name: AUTO_DB_UPDATE
+  value: 'true'
+- name: PHP_TIMEZONE
+  value: UTC
+# eLabFTW's defaults (50 PHP processes of up to 2 GB each) don't fit a
+# container's memory limit.
+- name: MAX_PHP_MEMORY
+  value: 512M
+- name: PHP_MAX_CHILDREN
+  value: '10'
+
+volumes:
+- name: data
+  title: Uploaded files and exports
+  size: 20
+  helm:
+    labels: persistence.labels
+    values:
+    - name: persistence.enabled
+      value: true
+    - name: persistence.size
+      value: '{{volumes.data.size}}Gi'
+    - name: persistence.storageClass
+      value: '{{volumes.data.storageClassName}}'
+
+helm:
+  name: wodby
+  source: oci://registry-1.docker.io/wodby/stateful
+  chart: oci://registry-1.docker.io/wodby/stateful
+  version: 0.4.0
+  valueMappings:
+    replicas: replicaCount
+    serviceAccountName: serviceAccount.name
+    serviceAccountCreate: serviceAccount.create
+  values:
+  - name: containerName
+    value: elabftw
+  - name: containerPorts
+    value:
+    - name: http
+      containerPort: 8080
+      protocol: TCP
+  - name: serviceAccount.automount
+    value: false
+  - name: podSecurityContext
+    value:
+      fsGroup: 1000
+      fsGroupChangePolicy: OnRootMismatch
+  # The image refuses to run as root and supports a read-only root file
+  # system: s6 and the generated configuration live in /run, caches in
+  # /var/cache/elabftw.
+  - name: securityContext
+    value:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: true
+      runAsGroup: 1000
+      runAsNonRoot: true
+      runAsUser: 1000
+  - name: extraVolumes
+    value:
+    - name: run
+      emptyDir:
+        medium: Memory
+        sizeLimit: 64Mi
+    - name: cache
+      emptyDir:
+        sizeLimit: 1Gi
+  - name: extraVolumeMounts
+    value:
+    - name: run
+      mountPath: /run
+    - name: cache
+      mountPath: /var/cache/elabftw
+  - name: persistence.mountPath
+    value: /var/lib/elabftw
+  - name: terminationGracePeriodSeconds
+    value: 30
+  # Runs before the image's init (s6): derives the secret key, installs the
+  # database with the sysadmin on the first deployment and points email at a
+  # linked SMTP server, then starts eLabFTW.
+  - name: command
+    value:
+    - /bin/sh
+    - -c
+    - |
+      set -eu
+      fail() {
+        echo "eLabFTW: $*" >&2
+        exit 1
+      }
+      cd /elabftw
+      # Uploaded files and exports live on the service volume.
+      mkdir -p /var/lib/elabftw/uploads /var/lib/elabftw/exports
+
+      # eLabFTW accepts only its own key format: a version header, 32 key bytes and
+      # their SHA-256 checksum, in hex. The key bytes are the generated service token,
+      # so the key stays the same on every deployment.
+      case "${ELABFTW_KEY_BYTES:-}" in
+        *[!0-9a-f]*|'') fail "the generated key token is missing or invalid." ;;
+      esac
+      [ "${#ELABFTW_KEY_BYTES}" -eq 64 ] || fail "the generated key token must have 64 hex digits."
+      SECRET_KEY=$(php -n -r '$b = hex2bin("def00000" . getenv("ELABFTW_KEY_BYTES")); echo bin2hex($b . hash("sha256", $b, true));')
+      export SECRET_KEY
+
+      # Exits 0 when eLabFTW is installed, 69 when the database is empty and 75 when
+      # it can't connect. "Installed" uses the installer's own rule: more than one
+      # table in the database.
+      db_state() {
+        php -r '
+          $options = [PDO::ATTR_TIMEOUT => 5, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+          if (getenv("DB_CERT_PATH")) {
+            $options[PDO::MYSQL_ATTR_SSL_CA] = getenv("DB_CERT_PATH");
+          }
+          try {
+            $db = new PDO(
+              sprintf("mysql:host=%s;port=%s;dbname=%s", getenv("DB_HOST"), getenv("DB_PORT") ?: "3306", getenv("DB_NAME")),
+              getenv("DB_USER"),
+              getenv("DB_PASSWORD"),
+              $options,
+            );
+            // eLabFTW needs MySQL 8 or later; its schema does not load on MariaDB.
+            $version = (string) $db->query("SELECT VERSION()")->fetchColumn();
+            if (stripos($version, "mariadb") !== false || (int) $version < 8) {
+              fwrite(STDERR, "eLabFTW: the linked database server runs $version; eLabFTW needs MySQL 8 or later.\n");
+              exit(78);
+            }
+            $tables = (int) $db->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE()")->fetchColumn();
+            exit($tables > 1 ? 0 : 69);
+          } catch (PDOException $e) {
+            fwrite(STDERR, "eLabFTW: waiting for the database: " . $e->getMessage() . "\n");
+            exit(75);
+          }'
+      }
+      started=$(date +%s)
+      while :; do
+        rc=0
+        db_state || rc=$?
+        case "$rc" in
+          0|69) break ;;
+          75) ;;
+          78) exit 1 ;;
+          *) fail "checking the database failed with exit code $rc." ;;
+        esac
+        [ $(( $(date +%s) - started )) -lt 300 ] || fail "the database is not reachable after 5 minutes."
+        sleep 3
+      done
+
+      # The first deployment installs the database with the administrator from the
+      # service settings, so the public sign-up page never makes a stranger the
+      # sysadmin. The password is checked first: eLabFTW creates the tables before
+      # the administrator and skips installation once tables exist.
+      if [ "$rc" -eq 69 ]; then
+        [ -n "${ELABFTW_ADMIN_EMAIL:-}" ] || fail "set the Admin email setting of this service and deploy again."
+        [ -n "${ELABFTW_ADMIN_PASSWORD:-}" ] || fail "set the Admin password setting of this service and deploy again."
+        php -r '
+          require "/elabftw/vendor/autoload.php";
+          try {
+            (new Elabftw\Services\PasswordValidator(24, Elabftw\Enums\PasswordComplexity::Strong, getenv("ELABFTW_ADMIN_PASSWORD")))->validate();
+          } catch (Throwable $e) {
+            fwrite(STDERR, "eLabFTW: the Admin password setting is too weak: " . $e->getMessage() . "\n");
+            exit(1);
+          }' || exit 1
+        # The installer prints every statement it runs and a sysadmin API key; keep
+        # both out of the logs.
+        rc=0
+        out=$(bin/init db:install \
+          --email "$ELABFTW_ADMIN_EMAIL" \
+          --firstname "${ELABFTW_ADMIN_FIRSTNAME:-Admin}" \
+          --lastname "${ELABFTW_ADMIN_LASTNAME:-Sysadmin}" \
+          --password "$ELABFTW_ADMIN_PASSWORD" 2>&1) || rc=$?
+        printf '%s\n' "$out" | grep -v -e 'API key' -e '^Executing:' || true
+        [ "$rc" -eq 0 ] || fail "installing the database failed."
+      fi
+
+      # eLabFTW keeps its email settings in the database and edits them in the
+      # Sysadmin panel. With a linked SMTP server, only the installer's placeholder
+      # values are replaced, so settings an administrator saved are kept.
+      if [ -n "${ELABFTW_SMTP_HOST:-}" ]; then
+        php -r '
+          $options = [PDO::ATTR_TIMEOUT => 5, PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION];
+          if (getenv("DB_CERT_PATH")) {
+            $options[PDO::MYSQL_ATTR_SSL_CA] = getenv("DB_CERT_PATH");
+          }
+          $db = new PDO(
+            sprintf("mysql:host=%s;port=%s;dbname=%s", getenv("DB_HOST"), getenv("DB_PORT") ?: "3306", getenv("DB_NAME")),
+            getenv("DB_USER"),
+            getenv("DB_PASSWORD"),
+            $options,
+          );
+          $db->beginTransaction();
+          $current = $db->query("SELECT conf_value FROM config WHERE conf_name = \"smtp_address\" FOR UPDATE")->fetchColumn();
+          if ($current === "mail.example.com") {
+            $set = $db->prepare("UPDATE config SET conf_value = ? WHERE conf_name = ?");
+            $set->execute([getenv("ELABFTW_SMTP_HOST"), "smtp_address"]);
+            $set->execute([getenv("ELABFTW_SMTP_PORT") ?: "25", "smtp_port"]);
+            echo "eLabFTW: email goes through the linked SMTP server " . getenv("ELABFTW_SMTP_HOST") . "\n";
+          }
+          if (getenv("ELABFTW_MAIL_FROM")) {
+            $from = $db->prepare("UPDATE config SET conf_value = ? WHERE conf_name = \"mail_from\" AND conf_value = \"notconfigured@example.com\"");
+            $from->execute([getenv("ELABFTW_MAIL_FROM")]);
+          }
+          $db->commit();' || fail "configuring the linked SMTP server failed."
+      fi
+
+      # The image's own startup applies schema updates (AUTO_DB_UPDATE) and starts
+      # nginx, PHP-FPM and the scheduler.
+      exec /init
+  # Waiting for the database and the first installation run before the web
+  # server starts.
+  - name: startupProbe
+    value:
+      httpGet:
+        path: /healthcheck
+        port: http
+      failureThreshold: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+  # Ready only while the database answers.
+  - name: readinessProbe
+    value:
+      httpGet:
+        path: /healthcheck.php
+        port: http
+      failureThreshold: 3
+      periodSeconds: 10
+      timeoutSeconds: 5
+  # nginx only, so a database outage doesn't restart eLabFTW.
+  - name: livenessProbe
+    value:
+      httpGet:
+        path: /healthcheck
+        port: http
+      failureThreshold: 6
+      periodSeconds: 10
+      timeoutSeconds: 5
+
+workloads:
+- name: main
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: '{{helm.release}}'
+  kind: statefulset
+  primary: true
+  helm:
+    labels: commonLabels
+    annotations: commonAnnotations
+    volumes: extraVolumes
+  containers:
+  - name: elabftw
+    image: elabftw/elabimg
+    resources:
+      request:
+        cpu: 50
+        memory: 192
+      limit:
+        memory: 2048
+    helm:
+      resources: resources
+      env: envVars
+      mounts: extraVolumeMounts
+      image:
+        repository: image.repository
+        tag: image.tag
+        registry: image.registry
+        pullPolicy: image.pullPolicy
