@@ -19,7 +19,7 @@ eLabFTW keeps its email settings in the database and edits them in **Sysadmin pa
 - `SITE_URL` is the service's URL in the environment. Links in emails and API responses use it.
 - TLS ends at Wodby's router, which sets `X-Forwarded-Proto`, so `DISABLE_HTTPS` is `true`. `SET_REAL_IP` takes client addresses from `X-Forwarded-For` sent from private network addresses.
 - `AUTO_DB_UPDATE` is `true`: a new version updates the database schema before eLabFTW serves requests.
-- `MAX_PHP_MEMORY` is `512M` and `PHP_MAX_CHILDREN` is `10`, so PHP fits the container's memory limit. `PHP_TIMEZONE` is `UTC`.
+- `MAX_PHP_MEMORY` is `512M` per request and `PHP_MAX_CHILDREN` is `10`, instead of eLabFTW's defaults of 2 GB and 50 processes, which are far beyond the container's memory limit. Raise the limit or lower these values if large exports or PDF generation run out of memory. `PHP_TIMEZONE` is `UTC`.
 
 Uploaded files and exports are stored on the `data` volume at `/var/lib/elabftw`. Sessions are kept in the container, so a restart signs everyone out.
 
