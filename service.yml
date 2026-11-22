@@ -54,6 +54,23 @@ settings:
   required: true
   secret: true
   var: ELABFTW_ADMIN_PASSWORD
+  # Mirrors eLabFTW's own install check (PasswordValidator(24, Strong)), so a
+  # password it would refuse is caught when the setting is saved instead of
+  # failing the first deployment. Its letter rule is "lowercase and uppercase,
+  # or any letter of an alphabet without case"; the two letter rules below say
+  # the same without lookahead. Digits stay ASCII so no value eLabFTW refuses
+  # passes here.
+  validation:
+    minLength: 24
+    rules:
+    - regex: '[\p{Lu}\p{Lo}]'
+      message: Include an uppercase letter.
+    - regex: '[\p{Ll}\p{Lo}]'
+      message: Include a lowercase letter.
+    - regex: '[0-9]'
+      message: Include a digit.
+    - regex: '[\p{P}\p{S}]'
+      message: Include a special character, such as a punctuation mark or symbol.
 - name: admin-firstname
   title: Admin first name
   description: First name of the eLabFTW sysadmin. Used only when the first deployment creates the sysadmin.
